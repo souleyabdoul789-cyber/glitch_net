@@ -1,7 +1,10 @@
-import asyncio, secrets, pymysql, os
-from passlib.context import CryptContext
+import asyncio, secrets, pymysql, os, bcrypt
 
-pwd_c = CryptContext(schemes=["bcrypt"],deprecated="auto")
+def hacher_mot_de_passe(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def verifier_mot_de_passe(password: str, hash_stocke: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hash_stocke.encode())
 
 def list_all_servers(db, exclure_expires=True):
     with db.cursor() as c:
@@ -282,7 +285,7 @@ def join_server(server_name,username,db):
 
 def create(username,password,public_key,db):
     token = secrets.token_hex(32)
-    pwd_hash = pwd_c.hash(password)
+    pwd_hash = hacher_mot_de_passe(password)
     with db.cursor() as c:
         try:
             c.execute("INSERT INTO user (username,password,token,public_key) VALUES(%s,%s,%s,%s)",(username,pwd_hash,token,public_key))
@@ -306,7 +309,7 @@ def login(username,password,db):
         row = c.fetchone()
         if not row:
             return None
-        if pwd_c.verify(password,row[2]):
+        if verifier_mot_de_passe(password,row[2]):
             return row
         else:
             return None
