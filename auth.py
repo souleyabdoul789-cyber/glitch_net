@@ -1,10 +1,7 @@
-import asyncio, secrets, pymysql, os, bcrypt
+import asyncio, secrets,pymysql
+from passlib.context import CryptContext
 
-def hacher_mot_de_passe(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-def verifier_mot_de_passe(password: str, hash_stocke: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hash_stocke.encode())
+pwd_c = CryptContext(schemes=["bcrypt"],deprecated="auto")
 
 def list_all_servers(db, exclure_expires=True):
     with db.cursor() as c:
@@ -81,12 +78,14 @@ def get_user_server(username,db):
                   """,(username,))
         return c.fetchall()
 def get_db():
+    with open(".pwd", "r") as f:
+        pwd = f.read().strip()
     return pymysql.connect(
-        host=os.getenv("DB_HOST"),
-        port=int(os.getenv("DB_PORT", "3306")),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        database=os.getenv("DB_NAME"),
+        host="mysql-2d8e732d-glitch-project789-fa15.j.aivencloud.com",
+        port=17882,
+        user="avnadmin",
+        password=pwd,
+        database="defaultdb",
         ssl={"ssl": {}}  # active le SSL requis par Aiven côté pymysql
     )
 
@@ -107,13 +106,11 @@ def ban(username,ip,reason="Violation",db=None):
 def uban_user(username,db=None):
     u_id = check_user(username,db)
     if not u_id:
-        return False
+        return
     user_id = u_id[0]
     with db.cursor() as c:
         c.execute("SELECT old_servers from ban WHERE user_id=%s ORDER BY id DESC LIMIT 1",(user_id,))
         row = c.fetchone()
-        if row is None:
-            return False
         old_servers = row[0]
         c.execute("DELETE FROM ban WHERE user_id=%s",(user_id,))
         if old_servers:
@@ -122,10 +119,9 @@ def uban_user(username,db=None):
                     continue
                 try:
                     c.execute("INSERT INTO server_members(server_id,user_id,role) VALUES(%s,%s,%s)",(int(sid),user_id,"member"))
-                except pymysql.IntegrityError:
-                    pass  # déjà remis dans ce serveur, ou serveur supprimé entre-temps : on continue les autres
-        db.commit()
-    return True
+                    return True
+                except:
+                    return False
 
 
 
@@ -243,7 +239,7 @@ def save_msg(server_name,username,content,db):
 def create_server(server_name,username,db):
     c_id = check_user(username,db)
     if c_id is None:
-        return False
+        return
     creator_id = c_id[0]
     with db.cursor() as c:
         try:
@@ -254,16 +250,17 @@ def create_server(server_name,username,db):
             return True
         except pymysql.IntegrityError:
             return False
-
+    return server_id
 def get_server(server_name,db):
-    result = None
     with db.cursor() as c:
         try:
             c.execute("SELECT id,server_name FROM server WHERE server_name=%s",(server_name,))
             result = c.fetchone()
         except pymysql.IntegrityError:
             print("Error")
-    return result
+    if result:
+        return result
+    return None
 
 def join_server(server_name,username,db):
     s_id = get_server(server_name,db)
@@ -285,7 +282,7 @@ def join_server(server_name,username,db):
 
 def create(username,password,public_key,db):
     token = secrets.token_hex(32)
-    pwd_hash = hacher_mot_de_passe(password)
+    pwd_hash = pwd_c.hash(password)
     with db.cursor() as c:
         try:
             c.execute("INSERT INTO user (username,password,token,public_key) VALUES(%s,%s,%s,%s)",(username,pwd_hash,token,public_key))
@@ -293,6 +290,7 @@ def create(username,password,public_key,db):
             return True
         except pymysql.IntegrityError:
             return False
+        return True
 
 def check_user(username,db):
     with db.cursor() as c:
@@ -309,7 +307,7 @@ def login(username,password,db):
         row = c.fetchone()
         if not row:
             return None
-        if verifier_mot_de_passe(password,row[2]):
+        if pwd_c.verify(password,row[2]):
             return row
         else:
             return None

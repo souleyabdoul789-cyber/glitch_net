@@ -1,4 +1,3 @@
-import asyncio, os
 from fastapi import FastAPI,WebSocket,WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from auth import *
@@ -8,7 +7,8 @@ from pydantic import BaseModel
 from itsdangerous import URLSafeTimedSerializer
 serveur_ephemere_token = {}
 app = FastAPI()
-key = os.getenv("SCRIPT_KEY")
+with open(".env","r") as f:
+    key = f.read().strip()
 s = URLSafeTimedSerializer(key)
 
 @app.get("/")
@@ -297,7 +297,8 @@ async def glitch(ws: WebSocket):
     finally:
         db.close()
 
-sys_key = os.getenv("SYS_KEY")
+with open(".sys", "r") as f:
+    sys_key = f.read().strip()
 
 @app.websocket("/ws/glitch/system")
 async def system(ws: WebSocket):
