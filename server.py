@@ -1,22 +1,31 @@
+import asyncio, os
 from fastapi import FastAPI,WebSocket,WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from auth import *
 from datetime import datetime
 import time
 from pydantic import BaseModel
-from itsdangerous import URLSafeTimedSerializer
 serveur_ephemere_token = {}
 app = FastAPI()
-with open(".env","r") as f:
-    key = f.read().strip()
-s = URLSafeTimedSerializer(key)
 
-@app.get("/")
+# Le site G-SOCIETY vit sur un domaine Render différent de Pluton — sans
+# CORS, le navigateur bloquerait tout appel fetch() entre les deux.
+# ⚠️ Remplace "*" par l'URL exacte du site G-SOCIETY une fois connue,
+# plus strict pour la prod (ex: ["https://g-society-xxxx.onrender.com"]).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/status")
 async def status_page():
-    """Page publique quand on visite l'URL Render — juste un statut visuel,
-    aucune donnée réelle exposée, thème identique au client."""
+    """Ancienne page de statut (pluie Matrix) — utile pour vérifier que
+    le process tourne, séparée du vrai site maintenant."""
     html = """<!DOCTYPE html>
-<html><head><title>GLITCH</title>
+<html><head><title>GLITCH — status</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#000;color:#0f0;font-family:'Courier New',monospace;height:100vh;overflow:hidden}
@@ -58,6 +67,115 @@ setInterval(draw,45);
 </script>
 </body></html>"""
     return HTMLResponse(content=html)
+
+
+@app.get("/")
+async def racine():
+    """Pluton n'affiche plus de pages — juste une confirmation JSON que
+    l'API/WebSocket tourne. Le site G-SOCIETY vit sur un service séparé
+    et appelle ces routes par le réseau."""
+    return {"status": "Pluton en ligne", "services": ["glitch"]}
+
+
+# ============================================================
+# API de la plateforme web — HTTP classique (pas WebSocket),
+# c'est un navigateur qui appelle ça, pas le client terminal.
+# ============================================================
+class CompteGSociety(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/gsociety/signup")
+async def api_gsociety_signup(data: CompteGSociety):
+    db = get_db()
+    ok = creer_compte_gsociety(data.username, data.password, db)
+    db.close()
+    if not ok:
+        return {"success": False, "error": "Ce nom de compte G-SOCIETY est déjà pris"}
+    return {"success": True, "message": "Compte G-SOCIETY créé. Connecte-toi pour générer une clé."}
+
+
+@app.post("/api/gsociety/login")
+async def api_gsociety_login(data: CompteGSociety):
+    db = get_db()
+    req = login_gsociety(data.username, data.password, db)
+    db.close()
+    if req is None:
+        return {"success": False, "error": "Identifiants G-SOCIETY incorrects"}
+    return {"success": True, "message": "Connecté à G-SOCIETY"}
+
+
+class DemandeCle(BaseModel):
+    username: str    # identifiants G-SOCIETY, pas GLITCH
+    password: str
+    categorie: str = "glitch"
+    duree_jours: int = 90
+
+@app.post("/api/request-key")
+async def api_request_key(data: DemandeCle):
+    db = get_db()
+    req = login_gsociety(data.username, data.password, db)
+    if req is None:
+        db.close()
+        return {"success": False, "error": "Identifiants G-SOCIETY incorrects"}
+    resultat = generer_api_key(data.username, db, categorie=data.categorie, duree_jours=data.duree_jours)
+    db.close()
+    if not resultat["ok"]:
+        return {"success": False, "error": resultat["error"]}
+    return {"success": True, "api_key": resultat["api_key"], "categorie": resultat["categorie"], "expires_in_days": resultat["expires_in_days"]}
+
+
+class Signalement(BaseModel):
+    api_key: str
+    glitch_username: str  # le compte GLITCH au nom duquel le signalement est fait
+    type: str  # "user" ou "bug"
+    target: str | None = None
+    motif: str
+    details: str | None = None
+
+@app.post("/api/report")
+async def api_report(data: Signalement):
+    db = get_db()
+    if not verifier_api_key(data.api_key, db, categorie_attendue="glitch"):
+        db.close()
+        return {"success": False, "error": "Clé API invalide ou expirée. Demande-en une nouvelle sur /report"}
+    if data.type not in ("user", "bug"):
+        db.close()
+        return {"success": False, "error": "Type de signalement invalide"}
+    creer_signalement(data.type, data.glitch_username, data.target, data.motif, data.details, db)
+    db.close()
+    return {"success": True, "message": "Signalement transmis à l'équipe. Merci."}
+
+
+class SuppressionServeur(BaseModel):
+    api_key: str
+    glitch_username: str  # doit être l'admin/créateur du serveur ciblé
+    server_name: str
+    motif: str | None = None
+
+@app.post("/api/delete-server")
+async def api_delete_server(data: SuppressionServeur):
+    db = get_db()
+    if not verifier_api_key(data.api_key, db, categorie_attendue="glitch"):
+        db.close()
+        return {"success": False, "error": "Clé API invalide ou expirée. Demande-en une nouvelle sur /report"}
+
+    statut = est_admin_du_serveur(data.glitch_username, data.server_name, db)
+
+    if statut == "server_not_found":
+        db.close()
+        return {"success": False, "error": f"Le serveur '{data.server_name}' n'existe pas"}
+    if statut in ("not_a_member", "not_admin", "user_not_found"):
+        db.close()
+        return {"success": False, "error": "Tu dois être l'admin/créateur de ce serveur pour le supprimer"}
+
+    # statut == "ok" : suppression réelle, on prévient les membres avant
+    pa = await payload(type="e-expired", msg=f"{data.server_name} a été supprimé par son créateur")
+    await send_in_server(data.server_name, pa)
+    supprimer_serveur_definitivement(data.server_name, db)
+    db.close()
+    return {"success": True, "message": f"Serveur '{data.server_name}' supprimé définitivement"}
+
 
 class AdminManager:
     def __init__(self):
@@ -111,7 +229,6 @@ async def send_in_server(server_name,message:dict,exclure:str =None):
         if username == exclure:
             continue
         await manager.send_to(username,message)
-KEY_VIOLATION_IPS = set()
 
 async def payload(**kwargs):
     return kwargs
@@ -157,10 +274,10 @@ async def glitch(ws: WebSocket):
     db = get_db()
     ip = ws.client.host
 
-    if ip in KEY_VIOLATION_IPS:
+    if est_ip_bloquee(ip, db):
         await ws.close(code=1008)
+        db.close()
         return
-
 
     await ws.accept()
 
@@ -178,12 +295,16 @@ async def glitch(ws: WebSocket):
                     await ws.send_json(data)
                     continue
 
-                key_s = rep.get("key")
-                if key_s != key:
-                    data = await result(c_result="key_error", statut="345", msg="Vous N'utilisez pas Notre Script Officiel, vous n'êtes plus autorisés à créer ni vous connecter à un compte existant")
+                # 3 champs obligatoires dans les deux cas : username, password, api_key.
+                # La clé prouve un accès légitime au service "glitch", délivrée par
+                # G-SOCIETY — plus aucune clé de script partagée.
+                api_key = rep.get("api_key")
+                if not verifier_api_key(api_key, db, categorie_attendue="glitch"):
+                    data = await result(c_result="key_error", statut="345", msg="Clé API invalide, expirée, ou absente. Génère-en une sur https://glitch-wbfo.onrender.com/report (compte G-SOCIETY requis)")
                     await ws.send_json(data)
-                    KEY_VIOLATION_IPS.add(ip)
+                    bloquer_ip(ip, "Clé API invalide au signup/login", db)
                     await ws.close(code=1008)
+                    db.close()
                     return
 
                 if type_ == "signup":
@@ -193,7 +314,10 @@ async def glitch(ws: WebSocket):
 
                     resulta = create(u, password, public_key, db)
                     if resulta:
-                        data = await result(c_result="c_result", statut="900", msg=f"Votre compte à été créé avec succès...!, vous pouvez à présent rejoindre ou créé un serveur N'oublie pas de visiter notre canal télégram https://t.me/glitch_chanel pour consulter les serveur les plus populaires ✨")
+                        data = await result(
+                            c_result="c_result", statut="900",
+                            msg=f"Votre compte à été créé avec succès...!, vous pouvez à présent rejoindre ou créé un serveur N'oublie pas de visiter notre canal télégram https://t.me/glitch_chanel pour consulter les serveur les plus populaires ✨"
+                        )
                         await ws.send_json(data)
                         username = u
                         await manager.connect(username, ws)
@@ -207,19 +331,21 @@ async def glitch(ws: WebSocket):
 
                     if is_ban(u, ip, db):
                         pa = await payload(type="BAN", statut="666", msg="Ce Compte Ne peut plus utilisée Glitch les activités ressens ne respecte pas Nos conditions d'utilisation, Vous Pouvez Demandé Un examen les examen prennent 24h Nous vous prie de patientez")
-                        await ws.send_json(pa)  # <- corrigé : le message part bien avant la fermeture
+                        await ws.send_json(pa)
                         await ws.close(code=1008)
+                        db.close()
                         return
 
                     req = login(u, password, db)
-                    if req is not None:
-                        data = await result(c_result="l_result", statut="900", msg="Vous Etes à nouveau Connecter")
-                        await ws.send_json(data)
-                        username = u
-                        await manager.connect(username, ws)
-                    else:
+                    if req is None:
                         data = await result(c_result="l_result", statut="405", msg="username ou password incorrect veuillez réessayer..!")
                         await ws.send_json(data)
+                        continue
+
+                    data = await result(c_result="l_result", statut="900", msg="Vous Etes à nouveau Connecter")
+                    await ws.send_json(data)
+                    username = u
+                    await manager.connect(username, ws)
 
                 continue
 
@@ -297,13 +423,14 @@ async def glitch(ws: WebSocket):
     finally:
         db.close()
 
-with open(".sys", "r") as f:
-    sys_key = f.read().strip()
+sys_key = os.getenv("SYS_KEY")
 
 @app.websocket("/ws/glitch/system")
 async def system(ws: WebSocket):
     ip = ws.client.host
-    if ip in KEY_VIOLATION_IPS:
+    db = get_db()
+    if est_ip_bloquee(ip, db):
+        db.close()
         await ws.close(code=1008)
         return
 
@@ -311,13 +438,15 @@ async def system(ws: WebSocket):
 
     rep = await ws.receive_json()
     if not rep:
+        db.close()
         return
 
     key_sys = rep.get("key_sys")
     if key_sys != sys_key:
         pa = await payload(type="sy_key_error",statut="888",msg="KeyError")
         await ws.send_json(pa)
-        KEY_VIOLATION_IPS.add(ip)
+        bloquer_ip(ip, "Mauvaise clé système sur /system", db)
+        db.close()
         await ws.close(code=1008)
         return
 
@@ -329,6 +458,7 @@ async def system(ws: WebSocket):
         return
 
     await admin_manager.conn_admin(admin_,ws)
+    db.close()  # la vérification initiale est finie ; chaque commande ouvre sa propre db plus bas
 
     try:
         while True:
@@ -358,6 +488,24 @@ async def system(ws: WebSocket):
                 ok = uban_user(username, db)
                 db.close()
                 ack = await payload(type="ack", msg=f"{username} débanni" if ok else "Aucun ban trouvé pour cet utilisateur")
+                await ws.send_json(ack)
+
+            elif cmd == "list_reports":
+                db = get_db()
+                rows = lister_signalements(db, statut=req.get("statut", "pending"))
+                db.close()
+                reports = [
+                    {"id": r[0], "type": r[1], "reporter": r[2], "target": r[3], "motif": r[4], "details": r[5], "date": str(r[6])}
+                    for r in rows
+                ]
+                pa = await payload(type="reports_list", reports=reports)
+                await ws.send_json(pa)
+
+            elif cmd == "resolve_report":
+                db = get_db()
+                resoudre_signalement(req.get("report_id"), req.get("statut", "resolved"), db)
+                db.close()
+                ack = await payload(type="ack", msg=f"Signalement #{req.get('report_id')} marqué {req.get('statut','resolved')}")
                 await ws.send_json(ack)
 
             else:
