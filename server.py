@@ -9,17 +9,11 @@ from pydantic import BaseModel
 serveur_ephemere_token = {}
 app = FastAPI()
 
-# Le site G-SOCIETY vit sur un domaine Render différent de Pluton — sans
-# CORS, le navigateur bloquerait tout appel fetch() entre les deux.
-# ⚠️ Remplace "*" par l'URL exacte du site G-SOCIETY une fois connue,
-# plus strict pour la prod (ex: ["https://g-society-xxxx.onrender.com"]).
-# Chaque service (site G-SOCIETY, futur frontend GRIND...) doit être
-# listé ici explicitement une fois son domaine connu.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://g-society.onrender.com",
-        # "https://grind-xxxx.onrender.com",  # à décommenter/compléter une fois déployé
+        "https://grind-school-7agz.onrender.com",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
