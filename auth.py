@@ -442,6 +442,25 @@ def verifier_api_key(cle, db, categorie_attendue="glitch"):
     return row is not None
 
 
+def verifier_api_key_identite(cle, db, categorie_attendue):
+    """Comme verifier_api_key, mais renvoie le username G-SOCIETY réel
+    propriétaire de la clé (ou None). Pour les services externes (GRIND,
+    et les suivants) qui ne doivent JAMAIS faire confiance à un username
+    fourni par le client — une seule clé ne doit pouvoir désigner qu'une
+    seule identité, jamais celle que le client prétend être."""
+    if not cle or not cle.startswith("ght_"):
+        return None
+    cle_hash = hashlib.sha256(cle.encode()).hexdigest()
+    with db.cursor() as c:
+        c.execute("""
+            SELECT g.username FROM api_keys ak
+            JOIN gsociety_accounts g ON g.id = ak.gsociety_id
+            WHERE ak.key_hash=%s AND ak.categorie=%s AND ak.expires_at > NOW()
+        """, (cle_hash, categorie_attendue))
+        row = c.fetchone()
+    return row[0] if row else None
+
+
 # ============================================================
 # Blocage IP permanent — remplace définitivement les listes
 # temporaires en mémoire (BAN_LIST / KEY_VIOLATION_IPS).

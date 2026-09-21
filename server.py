@@ -13,9 +13,14 @@ app = FastAPI()
 # CORS, le navigateur bloquerait tout appel fetch() entre les deux.
 # ⚠️ Remplace "*" par l'URL exacte du site G-SOCIETY une fois connue,
 # plus strict pour la prod (ex: ["https://g-society-xxxx.onrender.com"]).
+# Chaque service (site G-SOCIETY, futur frontend GRIND...) doit être
+# listé ici explicitement une fois son domaine connu.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://g-society.onrender.com"],
+    allow_origins=[
+        "https://g-society.onrender.com",
+        # "https://grind-xxxx.onrender.com",  # à décommenter/compléter une fois déployé
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -127,6 +132,25 @@ async def api_session_request_key(data: DemandeCleSession):
     if not resultat["ok"]:
         return {"success": False, "error": resultat["error"]}
     return {"success": True, "api_key": resultat["api_key"], "categorie": resultat["categorie"], "expires_in_days": resultat["expires_in_days"]}
+
+
+class VerifKeyRequest(BaseModel):
+    api_key: str
+    categorie: str  # le service appelant DOIT préciser sa propre catégorie
+
+@app.post("/api/verify-key")
+async def api_verify_key(data: VerifKeyRequest):
+    """Pour les services externes (GRIND, et les suivants) qui n'ont pas
+    accès à la base Pluton. Renvoie l'IDENTITÉ réelle liée à la clé — le
+    service appelant ne doit jamais faire confiance à un username fourni
+    par son propre client, seulement à celui-ci."""
+    db = get_db()
+    username = verifier_api_key_identite(data.api_key, db, categorie_attendue=data.categorie)
+    db.close()
+    if username is None:
+        return {"valid": False, "username": None}
+    return {"valid": True, "username": username}
+
 
 
 
