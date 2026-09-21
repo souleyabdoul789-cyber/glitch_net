@@ -326,13 +326,13 @@ def login(username,password,db):
 import hashlib
 from datetime import datetime, timedelta
 
-def creer_compte_gsociety(username, password, db):
+def creer_compte_gsociety(username, password, avatar_id, db):
     pwd_hash = hacher_mot_de_passe(password)
     with db.cursor() as c:
         try:
             c.execute(
-                "INSERT INTO gsociety_accounts (username,password) VALUES (%s,%s)",
-                (username, pwd_hash)
+                "INSERT INTO gsociety_accounts (username,password,avatar_id) VALUES (%s,%s,%s)",
+                (username, pwd_hash, avatar_id)
             )
             db.commit()
             return True
@@ -342,7 +342,7 @@ def creer_compte_gsociety(username, password, db):
 
 def login_gsociety(username, password, db):
     with db.cursor() as c:
-        c.execute("SELECT id,username,password FROM gsociety_accounts WHERE username=%s", (username,))
+        c.execute("SELECT id,username,password,avatar_id FROM gsociety_accounts WHERE username=%s", (username,))
         row = c.fetchone()
     if row is None:
         return None

@@ -85,14 +85,19 @@ class CompteGSociety(BaseModel):
     username: str
     password: str
 
+class InscriptionGSociety(BaseModel):
+    username: str
+    password: str
+    avatar_id: int
+
 @app.post("/api/gsociety/signup")
-async def api_gsociety_signup(data: CompteGSociety):
+async def api_gsociety_signup(data: InscriptionGSociety):
     db = get_db()
-    ok = creer_compte_gsociety(data.username, data.password, db)
+    ok = creer_compte_gsociety(data.username, data.password, data.avatar_id, db)
     db.close()
     if not ok:
-        return {"success": False, "error": "Ce nom de compte G-SOCIETY est déjà pris"}
-    return {"success": True, "message": "Compte G-SOCIETY créé. Connecte-toi pour générer une clé."}
+        return {"success": False, "error": "Ce nom de compte est déjà pris"}
+    return {"success": True, "message": "Compte créé avec succès"}
 
 
 @app.post("/api/gsociety/login")
@@ -101,8 +106,8 @@ async def api_gsociety_login(data: CompteGSociety):
     req = login_gsociety(data.username, data.password, db)
     db.close()
     if req is None:
-        return {"success": False, "error": "Identifiants G-SOCIETY incorrects"}
-    return {"success": True, "message": "Connecté à G-SOCIETY"}
+        return {"success": False, "error": "Identifiants incorrects"}
+    return {"success": True, "message": "Connexion réussie", "username": req[1], "avatar_id": req[3]}
 
 
 class DemandeCle(BaseModel):
