@@ -352,6 +352,38 @@ def login_gsociety(username, password, db):
 
 
 # ============================================================
+# Session — après connexion, un jeton évite de redemander le
+# mot de passe à chaque action (ex: générer une clé).
+# ============================================================
+def creer_session(gsociety_id, db, duree_jours=30):
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    expiration = datetime.now() + timedelta(days=duree_jours)
+    with db.cursor() as c:
+        c.execute(
+            "INSERT INTO gsociety_sessions (gsociety_id, token_hash, expires_at) VALUES (%s,%s,%s)",
+            (gsociety_id, token_hash, expiration)
+        )
+        db.commit()
+    return token
+
+
+def verifier_session(token, db):
+    """Renvoie (id, username, avatar_id) si le jeton est valide, sinon None."""
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with db.cursor() as c:
+        c.execute("""
+            SELECT g.id, g.username, g.avatar_id FROM gsociety_sessions s
+            JOIN gsociety_accounts g ON g.id = s.gsociety_id
+            WHERE s.token_hash = %s AND s.expires_at > NOW()
+        """, (token_hash,))
+        row = c.fetchone()
+    return row
+
+
+# ============================================================
 # Clés API — émises par G-SOCIETY, catégorisées par service
 # ("glitch" pour l'instant). Une clé prouve un accès légitime au
 # service, elle n'est pas liée 1:1 à un compte GLITCH précis.
@@ -380,7 +412,8 @@ def generer_api_key(gsociety_username, db, categorie="glitch", duree_jours=90):
             return {"ok": False, "error": f"Une clé '{categorie}' a déjà été générée récemment. Réessaie dans environ {heures}h."}
 
     duree_jours = max(1, min(int(duree_jours), 90))
-    cle_brute = "ght_" + secrets.token_urlsafe(32)
+    suffixe_service = categorie[:3].lower()  # ex: "glt" pour glitch — visible à l'oeil, identifie le service
+    cle_brute = "ght_" + secrets.token_urlsafe(28) + "_" + suffixe_service
     cle_hash = hashlib.sha256(cle_brute.encode()).hexdigest()
     expiration = datetime.now() + timedelta(days=duree_jours)
 

@@ -15,7 +15,7 @@ app = FastAPI()
 # plus strict pour la prod (ex: ["https://g-society-xxxx.onrender.com"]).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://g-society.onrender.com"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -71,10 +71,7 @@ setInterval(draw,45);
 
 @app.get("/")
 async def racine():
-    """Pluton n'affiche plus de pages — juste une confirmation JSON que
-    l'API/WebSocket tourne. Le site G-SOCIETY vit sur un service séparé
-    et appelle ces routes par le réseau."""
-    return {"status": "Pluton en ligne", "services": ["glitch"]}
+    return await status_page()
 
 
 # ============================================================
@@ -104,30 +101,33 @@ async def api_gsociety_signup(data: InscriptionGSociety):
 async def api_gsociety_login(data: CompteGSociety):
     db = get_db()
     req = login_gsociety(data.username, data.password, db)
-    db.close()
     if req is None:
+        db.close()
         return {"success": False, "error": "Identifiants incorrects"}
-    return {"success": True, "message": "Connexion réussie", "username": req[1], "avatar_id": req[3]}
+    token = creer_session(req[0], db)
+    db.close()
+    return {"success": True, "message": "Connexion réussie", "username": req[1], "avatar_id": req[3], "session_token": token}
 
 
-class DemandeCle(BaseModel):
-    username: str    # identifiants G-SOCIETY, pas GLITCH
-    password: str
+class DemandeCleSession(BaseModel):
+    session_token: str
     categorie: str = "glitch"
     duree_jours: int = 90
 
-@app.post("/api/request-key")
-async def api_request_key(data: DemandeCle):
+@app.post("/api/session/request-key")
+async def api_session_request_key(data: DemandeCleSession):
     db = get_db()
-    req = login_gsociety(data.username, data.password, db)
-    if req is None:
+    session = verifier_session(data.session_token, db)
+    if session is None:
         db.close()
-        return {"success": False, "error": "Identifiants G-SOCIETY incorrects"}
-    resultat = generer_api_key(data.username, db, categorie=data.categorie, duree_jours=data.duree_jours)
+        return {"success": False, "error": "Session expirée, veuillez vous reconnecter"}
+    username = session[1]
+    resultat = generer_api_key(username, db, categorie=data.categorie, duree_jours=data.duree_jours)
     db.close()
     if not resultat["ok"]:
         return {"success": False, "error": resultat["error"]}
     return {"success": True, "api_key": resultat["api_key"], "categorie": resultat["categorie"], "expires_in_days": resultat["expires_in_days"]}
+
 
 
 class Signalement(BaseModel):
