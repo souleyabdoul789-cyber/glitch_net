@@ -30,6 +30,57 @@ def list_user_servers(username, db):
         rows = c.fetchall()
     return [r[0] for r in rows]
 
+
+def list_user_servers_avec_non_lus(username, db):
+    """Comme list_user_servers, mais avec le nombre de messages arrivés
+    depuis la dernière visite — ce qui manquait pour 'rattraper' ce qui
+    s'est passé pendant qu'on était hors ligne."""
+    u = check_user(username, db)
+    if u is None:
+        return []
+    user_id = u[0]
+    with db.cursor() as c:
+        c.execute("""
+            SELECT s.server_name, sm.last_read_msg_id
+            FROM server s
+            JOIN server_members sm ON sm.server_id = s.id
+            WHERE sm.user_id = %s
+        """, (user_id,))
+        salons = c.fetchall()
+
+        resultat = []
+        for server_name, last_read in salons:
+            s = get_server(server_name, db)
+            if s is None:
+                continue
+            server_id = s[0]
+            if last_read is None:
+                c.execute("SELECT COUNT(*) FROM messages WHERE server_id=%s", (server_id,))
+            else:
+                c.execute("SELECT COUNT(*) FROM messages WHERE server_id=%s AND id > %s", (server_id, last_read))
+            non_lus = c.fetchone()[0]
+            resultat.append({"server_name": server_name, "non_lus": non_lus})
+    return resultat
+
+
+def marquer_salon_lu(username, server_name, db):
+    """Appelé quand l'utilisateur ouvre effectivement un salon — remet
+    son compteur de non-lus à zéro pour la prochaine fois."""
+    u = check_user(username, db)
+    s = get_server(server_name, db)
+    if u is None or s is None:
+        return
+    user_id, server_id = u[0], s[0]
+    with db.cursor() as c:
+        c.execute("SELECT MAX(id) FROM messages WHERE server_id=%s", (server_id,))
+        dernier_id = c.fetchone()[0]
+        if dernier_id is not None:
+            c.execute(
+                "UPDATE server_members SET last_read_msg_id=%s WHERE user_id=%s AND server_id=%s",
+                (dernier_id, user_id, server_id)
+            )
+            db.commit()
+
 def create_ephemeral_server(server_name, username, duree_secondes, db):
     try:
         duree_secondes = int(duree_secondes)
@@ -528,6 +579,20 @@ def creer_signalement(type_, reporter_username, target, motif, details, db):
             (type_, reporter_username, target, motif, details)
         )
         db.commit()
+
+
+def lister_bans_recents(db, limite=20):
+    """Pour le rattrapage admin : si l'admin n'était pas connecté au
+    moment d'un ban, la notif en direct est perdue — mais le ban lui-même
+    est déjà en base. Cette fonction permet de le retrouver après coup."""
+    with db.cursor() as c:
+        c.execute("""
+            SELECT b.id, u.username, b.ip, b.reason, b.banned_at
+            FROM ban b JOIN user u ON u.id = b.user_id
+            ORDER BY b.id DESC LIMIT %s
+        """, (limite,))
+        rows = c.fetchall()
+    return rows
 
 
 def lister_signalements(db, statut="pending"):

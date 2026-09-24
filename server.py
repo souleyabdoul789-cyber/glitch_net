@@ -9,11 +9,17 @@ from pydantic import BaseModel
 serveur_ephemere_token = {}
 app = FastAPI()
 
+# Le site G-SOCIETY vit sur un domaine Render différent de Pluton — sans
+# CORS, le navigateur bloquerait tout appel fetch() entre les deux.
+# ⚠️ Remplace "*" par l'URL exacte du site G-SOCIETY une fois connue,
+# plus strict pour la prod (ex: ["https://g-society-xxxx.onrender.com"]).
+# Chaque service (site G-SOCIETY, futur frontend GRIND...) doit être
+# listé ici explicitement une fois son domaine connu.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://g-society.onrender.com",
-        "https://grind-school-7agz.onrender.com",
+        # "https://grind-xxxx.onrender.com",  # à décommenter/compléter une fois déployé
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -406,7 +412,7 @@ async def glitch(ws: WebSocket):
                 await ws.send_json(pa)
 
             elif type_ == "my_rooms":
-                rooms = list_user_servers(username, db)
+                rooms = list_user_servers_avec_non_lus(username, db)
                 pa = await payload(type="my_rooms_list", rooms=rooms)
                 await ws.send_json(pa)
 
@@ -421,6 +427,7 @@ async def glitch(ws: WebSocket):
                 hist,next_cursor = get_historique(server_name,db,last_id,50)
                 pa = await payload(type="history", server_name=server_name, messages=hist,next_cursor=next_cursor)
                 await ws.send_json(pa)
+                marquer_salon_lu(username, server_name, db)  # rattrapage : ce salon n'a plus de non-lus
 
             elif type_ == "message":
                 server_name = rep.get("server_name")
@@ -481,6 +488,23 @@ async def system(ws: WebSocket):
         return
 
     await admin_manager.conn_admin(admin_,ws)
+
+    # Rattrapage automatique : l'admin voit tout de suite ce qu'il a manqué
+    # pendant qu'il n'était pas connecté, sans avoir à cliquer sur un bouton.
+    rows_reports = lister_signalements(db, statut="pending")
+    reports = [
+        {"id": r[0], "type": r[1], "reporter": r[2], "target": r[3], "motif": r[4], "details": r[5], "date": str(r[6])}
+        for r in rows_reports
+    ]
+    await ws.send_json(await payload(type="reports_list", reports=reports))
+
+    rows_bans = lister_bans_recents(db, limite=20)
+    bans = [
+        {"id": b[0], "username": b[1], "ip": b[2], "reason": b[3], "date": str(b[4])}
+        for b in rows_bans
+    ]
+    await ws.send_json(await payload(type="bans_recents", bans=bans))
+
     db.close()  # la vérification initiale est finie ; chaque commande ouvre sa propre db plus bas
 
     try:
