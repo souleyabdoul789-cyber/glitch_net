@@ -480,9 +480,17 @@ def suspendre_compte_gsociety(username, db):
     return True
 
 
-def certifier_compte_gsociety(username, badge, db):
+def certifier_compte_gsociety(username, db):
+    """Un seul badge possible ('certifie'), pas de texte libre."""
     with db.cursor() as c:
-        c.execute("UPDATE gsociety_accounts SET badge=%s WHERE username=%s", (badge, username))
+        c.execute("UPDATE gsociety_accounts SET badge='certifie' WHERE username=%s", (username,))
+        db.commit()
+        return c.rowcount > 0
+
+
+def retirer_certification_gsociety(username, db):
+    with db.cursor() as c:
+        c.execute("UPDATE gsociety_accounts SET badge=NULL WHERE username=%s", (username,))
         db.commit()
         return c.rowcount > 0
 

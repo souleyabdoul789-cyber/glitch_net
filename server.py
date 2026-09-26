@@ -8,11 +8,12 @@ import time
 from pydantic import BaseModel
 serveur_ephemere_token = {}
 app = FastAPI()
+r frontend GRIND...) doit être
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://g-society.onrender.com",
-        "https://grind-4vsz.onrender.com", 
+        "https://grind-4vsz.onrender.com",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -190,20 +191,26 @@ async def api_admin_suspend(data: ActionCompte):
     return {"success": ok, "message": f"{data.username} suspendu (sessions et clés révoquées)" if ok else "Compte introuvable"}
 
 
-class CertifierCompte(BaseModel):
-    session_token: str
-    username: str
-    badge: str
-
 @app.post("/api/admin/certify")
-async def api_admin_certify(data: CertifierCompte):
+async def api_admin_certify(data: ActionCompte):
     db = get_db()
     if est_admin_gsociety(data.session_token, db) is None:
         db.close()
         return {"success": False, "error": "Accès refusé"}
-    ok = certifier_compte_gsociety(data.username, data.badge, db)
+    ok = certifier_compte_gsociety(data.username, db)
     db.close()
-    return {"success": ok, "message": f"{data.username} certifié '{data.badge}'" if ok else "Compte introuvable"}
+    return {"success": ok, "message": f"{data.username} certifié" if ok else "Compte introuvable"}
+
+
+@app.post("/api/admin/uncertify")
+async def api_admin_uncertify(data: ActionCompte):
+    db = get_db()
+    if est_admin_gsociety(data.session_token, db) is None:
+        db.close()
+        return {"success": False, "error": "Accès refusé"}
+    ok = retirer_certification_gsociety(data.username, db)
+    db.close()
+    return {"success": ok, "message": f"Certification retirée à {data.username}" if ok else "Compte introuvable"}
 
 
 
