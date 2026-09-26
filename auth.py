@@ -435,6 +435,59 @@ def verifier_session(token, db):
 
 
 # ============================================================
+# Administration G-SOCIETY — gère les comptes G-SOCIETY eux-mêmes
+# (suspension globale, certification). Ne touche JAMAIS à la
+# logique interne d'un service (ça reste à GLITCH/GRIND).
+# ============================================================
+def est_admin_gsociety(session_token, db):
+    """Renvoie (id, username) si la session appartient à un admin, sinon None."""
+    session = verifier_session(session_token, db)
+    if session is None:
+        return None
+    gsociety_id, username, _ = session
+    with db.cursor() as c:
+        c.execute("SELECT is_admin FROM gsociety_accounts WHERE id=%s", (gsociety_id,))
+        row = c.fetchone()
+    if row and row[0]:
+        return (gsociety_id, username)
+    return None
+
+
+def lister_comptes_gsociety(db):
+    with db.cursor() as c:
+        c.execute("""
+            SELECT g.id, g.username, g.avatar_id, g.is_admin, g.badge, g.created_at,
+                   (SELECT COUNT(*) FROM api_keys WHERE gsociety_id=g.id) AS nb_cles
+            FROM gsociety_accounts g ORDER BY g.id DESC
+        """)
+        rows = c.fetchall()
+    return rows
+
+
+def suspendre_compte_gsociety(username, db):
+    """Coupe TOUT pour ce compte : sessions actives et clés API, tous
+    services confondus. Le compte lui-même n'est pas supprimé (garde la
+    trace), juste rendu inutilisable partout."""
+    with db.cursor() as c:
+        c.execute("SELECT id FROM gsociety_accounts WHERE username=%s", (username,))
+        row = c.fetchone()
+        if row is None:
+            return False
+        gsociety_id = row[0]
+        c.execute("DELETE FROM gsociety_sessions WHERE gsociety_id=%s", (gsociety_id,))
+        c.execute("DELETE FROM api_keys WHERE gsociety_id=%s", (gsociety_id,))
+        db.commit()
+    return True
+
+
+def certifier_compte_gsociety(username, badge, db):
+    with db.cursor() as c:
+        c.execute("UPDATE gsociety_accounts SET badge=%s WHERE username=%s", (badge, username))
+        db.commit()
+        return c.rowcount > 0
+
+
+# ============================================================
 # Clés API — émises par G-SOCIETY, catégorisées par service
 # ("glitch" pour l'instant). Une clé prouve un accès légitime au
 # service, elle n'est pas liée 1:1 à un compte GLITCH précis.

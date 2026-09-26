@@ -8,12 +8,11 @@ import time
 from pydantic import BaseModel
 serveur_ephemere_token = {}
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://g-society.onrender.com",
-        "https://grind-4vsz.onrender.com",
+        "https://grind-4vsz.onrender.com", 
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -144,6 +143,68 @@ async def api_verify_key(data: VerifKeyRequest):
     if username is None:
         return {"valid": False, "username": None}
     return {"valid": True, "username": username}
+
+
+# ============================================================
+# Administration G-SOCIETY — toute route ici vérifie d'abord que
+# la session appartient à un compte is_admin=True.
+# ============================================================
+class SessionOnly(BaseModel):
+    session_token: str
+
+@app.post("/api/admin/verify")
+async def api_admin_verify(data: SessionOnly):
+    db = get_db()
+    admin = est_admin_gsociety(data.session_token, db)
+    db.close()
+    return {"is_admin": admin is not None}
+
+
+@app.post("/api/admin/accounts")
+async def api_admin_accounts(data: SessionOnly):
+    db = get_db()
+    if est_admin_gsociety(data.session_token, db) is None:
+        db.close()
+        return {"success": False, "error": "Accès refusé"}
+    rows = lister_comptes_gsociety(db)
+    db.close()
+    comptes = [
+        {"id": r[0], "username": r[1], "avatar_id": r[2], "is_admin": bool(r[3]), "badge": r[4], "created_at": str(r[5]), "nb_cles": r[6]}
+        for r in rows
+    ]
+    return {"success": True, "comptes": comptes}
+
+
+class ActionCompte(BaseModel):
+    session_token: str
+    username: str
+
+@app.post("/api/admin/suspend")
+async def api_admin_suspend(data: ActionCompte):
+    db = get_db()
+    if est_admin_gsociety(data.session_token, db) is None:
+        db.close()
+        return {"success": False, "error": "Accès refusé"}
+    ok = suspendre_compte_gsociety(data.username, db)
+    db.close()
+    return {"success": ok, "message": f"{data.username} suspendu (sessions et clés révoquées)" if ok else "Compte introuvable"}
+
+
+class CertifierCompte(BaseModel):
+    session_token: str
+    username: str
+    badge: str
+
+@app.post("/api/admin/certify")
+async def api_admin_certify(data: CertifierCompte):
+    db = get_db()
+    if est_admin_gsociety(data.session_token, db) is None:
+        db.close()
+        return {"success": False, "error": "Accès refusé"}
+    ok = certifier_compte_gsociety(data.username, data.badge, db)
+    db.close()
+    return {"success": ok, "message": f"{data.username} certifié '{data.badge}'" if ok else "Compte introuvable"}
+
 
 
 
