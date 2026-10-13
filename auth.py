@@ -670,3 +670,78 @@ def resoudre_signalement(report_id, nouveau_statut, db):
     with db.cursor() as c:
         c.execute("UPDATE reports SET status=%s WHERE id=%s", (nouveau_statut, report_id))
         db.commit()
+# ============================================================
+# Annonces et releases par service — façon Play Store, texte +
+# lien seulement (pas de stockage de fichiers/médias nouveaux).
+# ============================================================
+def creer_post_service(service, type_, admin_username, title, body, db, version=None, apk_link=None):
+    with db.cursor() as c:
+        c.execute("SELECT id FROM gsociety_accounts WHERE username=%s", (admin_username,))
+        row = c.fetchone()
+        if row is None:
+            return False
+        admin_id = row[0]
+        c.execute("""
+            INSERT INTO service_posts (service, type, admin_gsociety_id, title, body, version, apk_link)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """, (service, type_, admin_id, title, body, version, apk_link))
+        db.commit()
+    return True
+
+
+def lister_posts_service(service, db):
+    with db.cursor() as c:
+        c.execute("""
+            SELECT p.id, p.type, p.title, p.body, p.version, p.apk_link, p.created_at,
+                   g.username, g.badge,
+                   (SELECT AVG(stars) FROM service_post_ratings WHERE post_id=p.id) AS note_moyenne,
+                   (SELECT COUNT(*) FROM service_post_ratings WHERE post_id=p.id) AS nb_notes
+            FROM service_posts p
+            JOIN gsociety_accounts g ON g.id = p.admin_gsociety_id
+            WHERE p.service=%s
+            ORDER BY p.id DESC
+        """, (service,))
+        rows = c.fetchall()
+    return rows
+
+
+def creer_commentaire_post(post_id, username, comment, db):
+    with db.cursor() as c:
+        c.execute("SELECT id FROM gsociety_accounts WHERE username=%s", (username,))
+        row = c.fetchone()
+        if row is None:
+            return False
+        c.execute(
+            "INSERT INTO service_post_comments (post_id, gsociety_id, comment) VALUES (%s,%s,%s)",
+            (post_id, row[0], comment)
+        )
+        db.commit()
+    return True
+
+
+def lister_commentaires_post(post_id, db):
+    with db.cursor() as c:
+        c.execute("""
+            SELECT c.comment, c.created_at, g.username, g.badge
+            FROM service_post_comments c
+            JOIN gsociety_accounts g ON g.id = c.gsociety_id
+            WHERE c.post_id=%s ORDER BY c.id ASC
+        """, (post_id,))
+        rows = c.fetchall()
+    return rows
+
+
+def noter_post(post_id, username, stars, db):
+    stars = max(1, min(int(stars), 5))
+    with db.cursor() as c:
+        c.execute("SELECT id FROM gsociety_accounts WHERE username=%s", (username,))
+        row = c.fetchone()
+        if row is None:
+            return False
+        gsociety_id = row[0]
+        c.execute("""
+            INSERT INTO service_post_ratings (post_id, gsociety_id, stars) VALUES (%s,%s,%s)
+            ON DUPLICATE KEY UPDATE stars=%s
+        """, (post_id, gsociety_id, stars, stars))
+        db.commit()
+    return True

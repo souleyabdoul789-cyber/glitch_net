@@ -8,12 +8,18 @@ import time
 from pydantic import BaseModel
 serveur_ephemere_token = {}
 app = FastAPI()
-r frontend GRIND...) doit être
+
+# Le site G-SOCIETY vit sur un domaine Render différent de Pluton — sans
+# CORS, le navigateur bloquerait tout appel fetch() entre les deux.
+# ⚠️ Remplace "*" par l'URL exacte du site G-SOCIETY une fois connue,
+# plus strict pour la prod (ex: ["https://g-society-xxxx.onrender.com"]).
+# Chaque service (site G-SOCIETY, futur frontend GRIND...) doit être
+# listé ici explicitement une fois son domaine connu.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://g-society.onrender.com",
-        "https://grind-4vsz.onrender.com",
+        # "https://grind-xxxx.onrender.com",  # à décommenter/compléter une fois déployé
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,7 +74,7 @@ setInterval(draw,45);
     return HTMLResponse(content=html)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def racine():
     return await status_page()
 
@@ -152,6 +158,101 @@ async def api_verify_key(data: VerifKeyRequest):
 # ============================================================
 class SessionOnly(BaseModel):
     session_token: str
+
+
+# ============================================================
+# Annonces / releases par service — texte + lien uniquement.
+# ============================================================
+class NouveauPost(BaseModel):
+    session_token: str
+    service: str
+    type: str  # "annonce" ou "release"
+    title: str
+    body: str
+    version: str | None = None
+    apk_link: str | None = None
+
+@app.post("/api/posts/create")
+async def api_posts_create(data: NouveauPost):
+    db = get_db()
+    admin = est_admin_gsociety(data.session_token, db)
+    if admin is None:
+        db.close()
+        return {"success": False, "error": "Accès refusé"}
+    _, username = admin
+    if data.type not in ("annonce", "release"):
+        db.close()
+        return {"success": False, "error": "Type invalide"}
+    ok = creer_post_service(data.service, data.type, username, data.title, data.body, db,
+                             version=data.version, apk_link=data.apk_link)
+    db.close()
+    return {"success": ok}
+
+
+class ListePosts(BaseModel):
+    service: str
+
+@app.post("/api/posts/list")
+async def api_posts_list(data: ListePosts):
+    db = get_db()
+    rows = lister_posts_service(data.service, db)
+    db.close()
+    posts = [{
+        "id": r[0], "type": r[1], "title": r[2], "body": r[3], "version": r[4], "apk_link": r[5],
+        "created_at": str(r[6]), "admin_username": r[7], "admin_badge": r[8],
+        "note_moyenne": round(float(r[9]), 1) if r[9] is not None else None, "nb_notes": r[10],
+    } for r in rows]
+    return {"success": True, "posts": posts}
+
+
+class NouveauCommentaire(BaseModel):
+    session_token: str
+    post_id: int
+    comment: str
+
+@app.post("/api/posts/comment")
+async def api_posts_comment(data: NouveauCommentaire):
+    db = get_db()
+    session = verifier_session(data.session_token, db)
+    if session is None:
+        db.close()
+        return {"success": False, "error": "Session expirée"}
+    username = session[1]
+    ok = creer_commentaire_post(data.post_id, username, data.comment, db)
+    db.close()
+    return {"success": ok}
+
+
+class ListeCommentaires(BaseModel):
+    post_id: int
+
+@app.post("/api/posts/comments")
+async def api_posts_comments(data: ListeCommentaires):
+    db = get_db()
+    rows = lister_commentaires_post(data.post_id, db)
+    db.close()
+    comments = [{"comment": r[0], "created_at": str(r[1]), "username": r[2], "badge": r[3]} for r in rows]
+    return {"success": True, "comments": comments}
+
+
+class NoterPost(BaseModel):
+    session_token: str
+    post_id: int
+    stars: int
+
+@app.post("/api/posts/rate")
+async def api_posts_rate(data: NoterPost):
+    db = get_db()
+    session = verifier_session(data.session_token, db)
+    if session is None:
+        db.close()
+        return {"success": False, "error": "Session expirée"}
+    username = session[1]
+    ok = noter_post(data.post_id, username, data.stars, db)
+    db.close()
+    return {"success": ok}
+
+
 
 @app.post("/api/admin/verify")
 async def api_admin_verify(data: SessionOnly):
