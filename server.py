@@ -183,7 +183,14 @@ async def api_posts_create(data: NouveauPost):
     if data.type not in ("annonce", "release"):
         db.close()
         return {"success": False, "error": "Type invalide"}
-    ok = creer_post_service(data.service, data.type, username, data.title, data.body, db,
+    title = data.title.strip()
+    if not title or not data.body.strip():
+        db.close()
+        return {"success": False, "error": "Titre et message requis"}
+    if len(title) > 150:
+        db.close()
+        return {"success": False, "error": "Titre trop long (150 caractères maximum)"}
+    ok = creer_post_service(data.service, data.type, username, title, data.body, db,
                              version=data.version, apk_link=data.apk_link)
     db.close()
     return {"success": ok}
