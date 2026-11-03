@@ -1,11 +1,15 @@
 import asyncio, os
-from fastapi import FastAPI,WebSocket,WebSocketDisconnect
+import logging
+from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Request
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from auth import *
 from datetime import datetime
 import time
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from api_gsociety import router as api_router
+from security import securite_middleware, migrer_schema, limiteur, ip_client, MSG_TROP_DE_REQUETES
 serveur_ephemere_token = {}
 app = FastAPI()
 
@@ -15,14 +19,17 @@ app = FastAPI()
 # plus strict pour la prod (ex: ["https://g-society-xxxx.onrender.com"]).
 # Chaque service (site G-SOCIETY, futur frontend GRIND...) doit être
 # listé ici explicitement une fois son domaine connu.
+app.add_middleware(BaseHTTPMiddleware, dispatch=securite_middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://g-society.onrender.com",
         # "https://grind-xxxx.onrender.com",  # à décommenter/compléter une fois déployé
     ],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["POST", "GET", "HEAD", "OPTIONS"],
+    allow_headers=["Content-Type"],
+    allow_credentials=False,
+    max_age=600,
 )
 
 @app.get("/status")
@@ -79,261 +86,21 @@ async def racine():
     return await status_page()
 
 
-# ============================================================
-# API de la plateforme web — HTTP classique (pas WebSocket),
-# c'est un navigateur qui appelle ça, pas le client terminal.
-# ============================================================
-class CompteGSociety(BaseModel):
-    username: str
-    password: str
-
-class InscriptionGSociety(BaseModel):
-    username: str
-    password: str
-    avatar_id: int
-
-@app.post("/api/gsociety/signup")
-async def api_gsociety_signup(data: InscriptionGSociety):
-    db = get_db()
-    ok = creer_compte_gsociety(data.username, data.password, data.avatar_id, db)
-    db.close()
-    if not ok:
-        return {"success": False, "error": "Ce nom de compte est déjà pris"}
-    return {"success": True, "message": "Compte créé avec succès"}
-
-
-@app.post("/api/gsociety/login")
-async def api_gsociety_login(data: CompteGSociety):
-    db = get_db()
-    req = login_gsociety(data.username, data.password, db)
-    if req is None:
-        db.close()
-        return {"success": False, "error": "Identifiants incorrects"}
-    token = creer_session(req[0], db)
-    db.close()
-    return {"success": True, "message": "Connexion réussie", "username": req[1], "avatar_id": req[3], "session_token": token}
-
-
-class DemandeCleSession(BaseModel):
-    session_token: str
-    categorie: str = "glitch"
-    duree_jours: int = 90
-
-@app.post("/api/session/request-key")
-async def api_session_request_key(data: DemandeCleSession):
-    db = get_db()
-    session = verifier_session(data.session_token, db)
-    if session is None:
-        db.close()
-        return {"success": False, "error": "Session expirée, veuillez vous reconnecter"}
-    username = session[1]
-    resultat = generer_api_key(username, db, categorie=data.categorie, duree_jours=data.duree_jours)
-    db.close()
-    if not resultat["ok"]:
-        return {"success": False, "error": resultat["error"]}
-    return {"success": True, "api_key": resultat["api_key"], "categorie": resultat["categorie"], "expires_in_days": resultat["expires_in_days"]}
-
-
-class VerifKeyRequest(BaseModel):
-    api_key: str
-    categorie: str  # le service appelant DOIT préciser sa propre catégorie
-
-@app.post("/api/verify-key")
-async def api_verify_key(data: VerifKeyRequest):
-    """Pour les services externes (GRIND, et les suivants) qui n'ont pas
-    accès à la base Pluton. Renvoie l'IDENTITÉ réelle liée à la clé — le
-    service appelant ne doit jamais faire confiance à un username fourni
-    par son propre client, seulement à celui-ci."""
-    db = get_db()
-    username = verifier_api_key_identite(data.api_key, db, categorie_attendue=data.categorie)
-    db.close()
-    if username is None:
-        return {"valid": False, "username": None}
-    return {"valid": True, "username": username}
-
-
-# ============================================================
-# Administration G-SOCIETY — toute route ici vérifie d'abord que
-# la session appartient à un compte is_admin=True.
-# ============================================================
-class SessionOnly(BaseModel):
-    session_token: str
-
-
-# ============================================================
-# Annonces / releases par service — texte + lien uniquement.
-# ============================================================
-class NouveauPost(BaseModel):
-    session_token: str
-    service: str
-    type: str  # "annonce" ou "release"
-    title: str
-    body: str
-    version: str | None = None
-    apk_link: str | None = None
-
-@app.post("/api/posts/create")
-async def api_posts_create(data: NouveauPost):
-    db = get_db()
-    admin = est_admin_gsociety(data.session_token, db)
-    if admin is None:
-        db.close()
-        return {"success": False, "error": "Accès refusé"}
-    _, username = admin
-    if data.type not in ("annonce", "release"):
-        db.close()
-        return {"success": False, "error": "Type invalide"}
-    title = data.title.strip()
-    if not title or not data.body.strip():
-        db.close()
-        return {"success": False, "error": "Titre et message requis"}
-    if len(title) > 150:
-        db.close()
-        return {"success": False, "error": "Titre trop long (150 caractères maximum)"}
-    ok = creer_post_service(data.service, data.type, username, title, data.body, db,
-                             version=data.version, apk_link=data.apk_link)
-    db.close()
-    return {"success": ok}
-
-
-class ListePosts(BaseModel):
-    service: str
-
-@app.post("/api/posts/list")
-async def api_posts_list(data: ListePosts):
-    db = get_db()
-    rows = lister_posts_service(data.service, db)
-    db.close()
-    posts = [{
-        "id": r[0], "type": r[1], "title": r[2], "body": r[3], "version": r[4], "apk_link": r[5],
-        "created_at": str(r[6]), "admin_username": r[7], "admin_badge": r[8],
-        "note_moyenne": round(float(r[9]), 1) if r[9] is not None else None, "nb_notes": r[10],
-    } for r in rows]
-    return {"success": True, "posts": posts}
-
-
-class NouveauCommentaire(BaseModel):
-    session_token: str
-    post_id: int
-    comment: str
-
-@app.post("/api/posts/comment")
-async def api_posts_comment(data: NouveauCommentaire):
-    db = get_db()
-    session = verifier_session(data.session_token, db)
-    if session is None:
-        db.close()
-        return {"success": False, "error": "Session expirée"}
-    username = session[1]
-    ok = creer_commentaire_post(data.post_id, username, data.comment, db)
-    db.close()
-    return {"success": ok}
-
-
-class ListeCommentaires(BaseModel):
-    post_id: int
-
-@app.post("/api/posts/comments")
-async def api_posts_comments(data: ListeCommentaires):
-    db = get_db()
-    rows = lister_commentaires_post(data.post_id, db)
-    db.close()
-    comments = [{"comment": r[0], "created_at": str(r[1]), "username": r[2], "badge": r[3]} for r in rows]
-    return {"success": True, "comments": comments}
-
-
-class NoterPost(BaseModel):
-    session_token: str
-    post_id: int
-    stars: int
-
-@app.post("/api/posts/rate")
-async def api_posts_rate(data: NoterPost):
-    db = get_db()
-    session = verifier_session(data.session_token, db)
-    if session is None:
-        db.close()
-        return {"success": False, "error": "Session expirée"}
-    username = session[1]
-    ok = noter_post(data.post_id, username, data.stars, db)
-    db.close()
-    return {"success": ok}
-
-
-
-@app.post("/api/admin/verify")
-async def api_admin_verify(data: SessionOnly):
-    db = get_db()
-    admin = est_admin_gsociety(data.session_token, db)
-    db.close()
-    return {"is_admin": admin is not None}
-
-
-@app.post("/api/admin/accounts")
-async def api_admin_accounts(data: SessionOnly):
-    db = get_db()
-    if est_admin_gsociety(data.session_token, db) is None:
-        db.close()
-        return {"success": False, "error": "Accès refusé"}
-    rows = lister_comptes_gsociety(db)
-    db.close()
-    comptes = [
-        {"id": r[0], "username": r[1], "avatar_id": r[2], "is_admin": bool(r[3]), "badge": r[4], "created_at": str(r[5]), "nb_cles": r[6]}
-        for r in rows
-    ]
-    return {"success": True, "comptes": comptes}
-
-
-class ActionCompte(BaseModel):
-    session_token: str
-    username: str
-
-@app.post("/api/admin/suspend")
-async def api_admin_suspend(data: ActionCompte):
-    db = get_db()
-    if est_admin_gsociety(data.session_token, db) is None:
-        db.close()
-        return {"success": False, "error": "Accès refusé"}
-    ok = suspendre_compte_gsociety(data.username, db)
-    db.close()
-    return {"success": ok, "message": f"{data.username} suspendu (sessions et clés révoquées)" if ok else "Compte introuvable"}
-
-
-@app.post("/api/admin/certify")
-async def api_admin_certify(data: ActionCompte):
-    db = get_db()
-    if est_admin_gsociety(data.session_token, db) is None:
-        db.close()
-        return {"success": False, "error": "Accès refusé"}
-    ok = certifier_compte_gsociety(data.username, db)
-    db.close()
-    return {"success": ok, "message": f"{data.username} certifié" if ok else "Compte introuvable"}
-
-
-@app.post("/api/admin/uncertify")
-async def api_admin_uncertify(data: ActionCompte):
-    db = get_db()
-    if est_admin_gsociety(data.session_token, db) is None:
-        db.close()
-        return {"success": False, "error": "Accès refusé"}
-    ok = retirer_certification_gsociety(data.username, db)
-    db.close()
-    return {"success": ok, "message": f"Certification retirée à {data.username}" if ok else "Compte introuvable"}
-
-
-
+app.include_router(api_router)
 
 
 class Signalement(BaseModel):
-    api_key: str
-    glitch_username: str  # le compte GLITCH au nom duquel le signalement est fait
-    type: str  # "user" ou "bug"
-    target: str | None = None
-    motif: str
-    details: str | None = None
+    api_key: str = Field(max_length=200)
+    glitch_username: str = Field(max_length=64)  # le compte GLITCH au nom duquel le signalement est fait
+    type: str = Field(max_length=10)  # "user" ou "bug"
+    target: str | None = Field(default=None, max_length=64)
+    motif: str = Field(max_length=200)
+    details: str | None = Field(default=None, max_length=2000)
 
 @app.post("/api/report")
-async def api_report(data: Signalement):
+async def api_report(data: Signalement, request: Request):
+    if not limiteur.autorise(f"report:{ip_client(request)}", 8, 3600):
+        return {"success": False, "error": MSG_TROP_DE_REQUETES}
     db = get_db()
     if not verifier_api_key(data.api_key, db, categorie_attendue="glitch"):
         db.close()
@@ -347,13 +114,15 @@ async def api_report(data: Signalement):
 
 
 class SuppressionServeur(BaseModel):
-    api_key: str
-    glitch_username: str  # doit être l'admin/créateur du serveur ciblé
-    server_name: str
-    motif: str | None = None
+    api_key: str = Field(max_length=200)
+    glitch_username: str = Field(max_length=64)  # doit être l'admin/créateur du serveur ciblé
+    server_name: str = Field(max_length=100)
+    motif: str | None = Field(default=None, max_length=300)
 
 @app.post("/api/delete-server")
-async def api_delete_server(data: SuppressionServeur):
+async def api_delete_server(data: SuppressionServeur, request: Request):
+    if not limiteur.autorise(f"delsrv:{ip_client(request)}", 10, 3600):
+        return {"success": False, "error": MSG_TROP_DE_REQUETES}
     db = get_db()
     if not verifier_api_key(data.api_key, db, categorie_attendue="glitch"):
         db.close()
@@ -466,6 +235,15 @@ async def nettoyer_serveurs_expires():
 
 @app.on_event("startup")
 async def startup():
+    logging.basicConfig(level=logging.INFO)
+    try:  # migrations idempotentes : colonnes manquantes, titre trop court…
+        db = get_db()
+        try:
+            migrer_schema(db)
+        finally:
+            db.close()
+    except Exception:
+        logging.getLogger("pluton").exception("Migration au démarrage impossible (le serveur démarre quand même)")
     asyncio.create_task(nettoyer_serveurs_expires())
 
 @app.websocket("/ws/glitch")

@@ -377,29 +377,44 @@ def login(username,password,db):
 import hashlib
 from datetime import datetime, timedelta
 
+CGU_VERSION = "2026-11"
+
 def creer_compte_gsociety(username, password, avatar_id, db):
+    """Renvoie l'id du nouveau compte, ou None si l'identifiant est pris."""
     pwd_hash = hacher_mot_de_passe(password)
     with db.cursor() as c:
         try:
             c.execute(
-                "INSERT INTO gsociety_accounts (username,password,avatar_id) VALUES (%s,%s,%s)",
-                (username, pwd_hash, avatar_id)
+                "INSERT INTO gsociety_accounts (username,password,avatar_id,cgu_accepted_at,cgu_version) "
+                "VALUES (%s,%s,%s,NOW(),%s)",
+                (username, pwd_hash, avatar_id, CGU_VERSION)
             )
             db.commit()
-            return True
+            return c.lastrowid
         except pymysql.IntegrityError:
-            return False
+            return None
 
+
+_HASH_LEURRE = bcrypt.hashpw(b"leurre-temps-constant", bcrypt.gensalt()).decode()
 
 def login_gsociety(username, password, db):
+    """Renvoie (id, username, hash, avatar_id), \"suspendu\" ou None."""
     with db.cursor() as c:
-        c.execute("SELECT id,username,password,avatar_id FROM gsociety_accounts WHERE username=%s", (username,))
+        c.execute("SELECT id,username,password,avatar_id,suspended_at FROM gsociety_accounts WHERE username=%s", (username,))
         row = c.fetchone()
     if row is None:
+        try: verifier_mot_de_passe(password, _HASH_LEURRE)  # même durée qu'un vrai compte
+        except Exception: pass
         return None
-    if verifier_mot_de_passe(password, row[2]):
-        return row
-    return None
+    try:
+        ok = verifier_mot_de_passe(password, row[2])
+    except Exception:
+        ok = False
+    if not ok:
+        return None
+    if row[4] is not None:
+        return "suspendu"
+    return row[:4]
 
 
 # ============================================================
@@ -428,10 +443,29 @@ def verifier_session(token, db):
         c.execute("""
             SELECT g.id, g.username, g.avatar_id FROM gsociety_sessions s
             JOIN gsociety_accounts g ON g.id = s.gsociety_id
-            WHERE s.token_hash = %s AND s.expires_at > NOW()
+            WHERE s.token_hash = %s AND s.expires_at > NOW() AND g.suspended_at IS NULL
         """, (token_hash,))
         row = c.fetchone()
     return row
+
+
+def supprimer_session(token, db):
+    if not token:
+        return
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with db.cursor() as c:
+        c.execute("DELETE FROM gsociety_sessions WHERE token_hash=%s", (token_hash,))
+        db.commit()
+
+
+def profil_gsociety(gsociety_id, db):
+    """Profil public/privé minimal : 'verifie' = badge certifié OU administrateur."""
+    with db.cursor() as c:
+        c.execute("SELECT username, avatar_id, is_admin, badge FROM gsociety_accounts WHERE id=%s", (gsociety_id,))
+        r = c.fetchone()
+    if r is None:
+        return None
+    return {"username": r[0], "avatar_id": r[1], "is_admin": bool(r[2]), "verified": bool(r[2] or r[3])}
 
 
 # ============================================================
@@ -457,7 +491,7 @@ def lister_comptes_gsociety(db):
     with db.cursor() as c:
         c.execute("""
             SELECT g.id, g.username, g.avatar_id, g.is_admin, g.badge, g.created_at,
-                   (SELECT COUNT(*) FROM api_keys WHERE gsociety_id=g.id) AS nb_cles
+                   (SELECT COUNT(*) FROM api_keys WHERE gsociety_id=g.id) AS nb_cles, g.suspended_at
             FROM gsociety_accounts g ORDER BY g.id DESC
         """)
         rows = c.fetchall()
@@ -469,15 +503,25 @@ def suspendre_compte_gsociety(username, db):
     services confondus. Le compte lui-même n'est pas supprimé (garde la
     trace), juste rendu inutilisable partout."""
     with db.cursor() as c:
-        c.execute("SELECT id FROM gsociety_accounts WHERE username=%s", (username,))
+        c.execute("SELECT id, is_admin FROM gsociety_accounts WHERE username=%s", (username,))
         row = c.fetchone()
         if row is None:
             return False
+        if row[1]:
+            return "admin"  # un administrateur ne peut pas être suspendu depuis l'interface
         gsociety_id = row[0]
+        c.execute("UPDATE gsociety_accounts SET suspended_at=NOW() WHERE id=%s", (gsociety_id,))
         c.execute("DELETE FROM gsociety_sessions WHERE gsociety_id=%s", (gsociety_id,))
         c.execute("DELETE FROM api_keys WHERE gsociety_id=%s", (gsociety_id,))
         db.commit()
     return True
+
+
+def reactiver_compte_gsociety(username, db):
+    with db.cursor() as c:
+        c.execute("UPDATE gsociety_accounts SET suspended_at=NULL WHERE username=%s", (username,))
+        db.commit()
+        return c.rowcount > 0
 
 
 def certifier_compte_gsociety(username, db):
@@ -523,6 +567,8 @@ def generer_api_key(gsociety_username, db, categorie="glitch", duree_jours=90):
             heures = int(attente.total_seconds() // 3600)
             return {"ok": False, "error": f"Une clé '{categorie}' a déjà été générée récemment. Réessaie dans environ {heures}h."}
 
+    if categorie not in ("glitch", "grind"):
+        return {"ok": False, "error": "Service inconnu"}
     duree_jours = max(1, min(int(duree_jours), 90))
     suffixe_service = categorie[:3].lower()  # ex: "glt" pour glitch — visible à l'oeil, identifie le service
     cle_brute = "ght_" + secrets.token_urlsafe(28) + "_" + suffixe_service
@@ -547,7 +593,8 @@ def verifier_api_key(cle, db, categorie_attendue="glitch"):
     cle_hash = hashlib.sha256(cle.encode()).hexdigest()
     with db.cursor() as c:
         c.execute(
-            "SELECT id FROM api_keys WHERE key_hash=%s AND categorie=%s AND expires_at > NOW()",
+            "SELECT ak.id FROM api_keys ak JOIN gsociety_accounts g ON g.id = ak.gsociety_id "
+            "WHERE ak.key_hash=%s AND ak.categorie=%s AND ak.expires_at > NOW() AND g.suspended_at IS NULL",
             (cle_hash, categorie_attendue)
         )
         row = c.fetchone()
@@ -567,7 +614,7 @@ def verifier_api_key_identite(cle, db, categorie_attendue):
         c.execute("""
             SELECT g.username FROM api_keys ak
             JOIN gsociety_accounts g ON g.id = ak.gsociety_id
-            WHERE ak.key_hash=%s AND ak.categorie=%s AND ak.expires_at > NOW()
+            WHERE ak.key_hash=%s AND ak.categorie=%s AND ak.expires_at > NOW() AND g.suspended_at IS NULL
         """, (cle_hash, categorie_attendue))
         row = c.fetchone()
     return row[0] if row else None
@@ -693,7 +740,7 @@ def lister_posts_service(service, db):
     with db.cursor() as c:
         c.execute("""
             SELECT p.id, p.type, p.title, p.body, p.version, p.apk_link, p.created_at,
-                   g.username, g.badge,
+                   g.username, (g.badge IS NOT NULL OR g.is_admin = 1) AS verifie,
                    (SELECT AVG(stars) FROM service_post_ratings WHERE post_id=p.id) AS note_moyenne,
                    (SELECT COUNT(*) FROM service_post_ratings WHERE post_id=p.id) AS nb_notes
             FROM service_posts p
@@ -707,6 +754,9 @@ def lister_posts_service(service, db):
 
 def creer_commentaire_post(post_id, username, comment, db):
     with db.cursor() as c:
+        c.execute("SELECT 1 FROM service_posts WHERE id=%s", (post_id,))
+        if c.fetchone() is None:
+            return False
         c.execute("SELECT id FROM gsociety_accounts WHERE username=%s", (username,))
         row = c.fetchone()
         if row is None:
@@ -722,7 +772,7 @@ def creer_commentaire_post(post_id, username, comment, db):
 def lister_commentaires_post(post_id, db):
     with db.cursor() as c:
         c.execute("""
-            SELECT c.comment, c.created_at, g.username, g.badge
+            SELECT c.comment, c.created_at, g.username, (g.badge IS NOT NULL OR g.is_admin = 1) AS verifie
             FROM service_post_comments c
             JOIN gsociety_accounts g ON g.id = c.gsociety_id
             WHERE c.post_id=%s ORDER BY c.id ASC
@@ -734,6 +784,9 @@ def lister_commentaires_post(post_id, db):
 def noter_post(post_id, username, stars, db):
     stars = max(1, min(int(stars), 5))
     with db.cursor() as c:
+        c.execute("SELECT 1 FROM service_posts WHERE id=%s", (post_id,))
+        if c.fetchone() is None:
+            return False
         c.execute("SELECT id FROM gsociety_accounts WHERE username=%s", (username,))
         row = c.fetchone()
         if row is None:
