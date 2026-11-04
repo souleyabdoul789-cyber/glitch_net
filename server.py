@@ -15,7 +15,7 @@ app = FastAPI()
 
 # Le site G-SOCIETY vit sur un domaine Render différent de Pluton — sans
 # CORS, le navigateur bloquerait tout appel fetch() entre les deux.
-# ⚠️ Remplace "*" par l'URL exacte du site G-SOCIETY une fois connue,
+# Remplace "*" par l'URL exacte du site G-SOCIETY une fois connue,
 # plus strict pour la prod (ex: ["https://g-society-xxxx.onrender.com"]).
 # Chaque service (site G-SOCIETY, futur frontend GRIND...) doit être
 # listé ici explicitement une fois son domaine connu.
@@ -293,7 +293,7 @@ async def glitch(ws: WebSocket):
                     if resulta:
                         data = await result(
                             c_result="c_result", statut="900",
-                            msg=f"Votre compte à été créé avec succès...!, vous pouvez à présent rejoindre ou créé un serveur N'oublie pas de visiter notre canal télégram https://t.me/glitch_chanel pour consulter les serveur les plus populaires ✨"
+                            msg=f"Votre compte à été créé avec succès...!, vous pouvez à présent rejoindre ou créé un serveur N'oublie pas de visiter notre canal télégram https://t.me/glitch_chanel pour consulter les serveur les plus populaires "
                         )
                         await ws.send_json(data)
                         username = u

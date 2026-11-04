@@ -721,7 +721,7 @@ def resoudre_signalement(report_id, nouveau_statut, db):
 # Annonces et releases par service — façon Play Store, texte +
 # lien seulement (pas de stockage de fichiers/médias nouveaux).
 # ============================================================
-def creer_post_service(service, type_, admin_username, title, body, db, version=None, apk_link=None):
+def creer_post_service(service, type_, admin_username, title, body, db, version=None, apk_link=None, font_style=None, image_ids=None):
     with db.cursor() as c:
         c.execute("SELECT id FROM gsociety_accounts WHERE username=%s", (admin_username,))
         row = c.fetchone()
@@ -729,11 +729,16 @@ def creer_post_service(service, type_, admin_username, title, body, db, version=
             return False
         admin_id = row[0]
         c.execute("""
-            INSERT INTO service_posts (service, type, admin_gsociety_id, title, body, version, apk_link)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)
-        """, (service, type_, admin_id, title, body, version, apk_link))
+            INSERT INTO service_posts (service, type, admin_gsociety_id, title, body, version, apk_link, font_style)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (service, type_, admin_id, title, body, version, apk_link, font_style))
+        post_id = c.lastrowid
+        # on ne rattache que des images envoyées par CET admin et pas encore utilisées
+        for img_id in (image_ids or []):
+            c.execute("UPDATE post_media SET post_id=%s WHERE id=%s AND uploader_id=%s AND post_id IS NULL",
+                      (post_id, img_id, admin_id))
         db.commit()
-    return True
+    return post_id
 
 
 def lister_posts_service(service, db):
@@ -742,7 +747,9 @@ def lister_posts_service(service, db):
             SELECT p.id, p.type, p.title, p.body, p.version, p.apk_link, p.created_at,
                    g.username, (g.badge IS NOT NULL OR g.is_admin = 1) AS verifie,
                    (SELECT AVG(stars) FROM service_post_ratings WHERE post_id=p.id) AS note_moyenne,
-                   (SELECT COUNT(*) FROM service_post_ratings WHERE post_id=p.id) AS nb_notes
+                   (SELECT COUNT(*) FROM service_post_ratings WHERE post_id=p.id) AS nb_notes,
+                   p.font_style,
+                   (SELECT COUNT(*) FROM service_post_comments WHERE post_id=p.id) AS nb_comments
             FROM service_posts p
             JOIN gsociety_accounts g ON g.id = p.admin_gsociety_id
             WHERE p.service=%s
@@ -769,16 +776,102 @@ def creer_commentaire_post(post_id, username, comment, db):
     return True
 
 
-def lister_commentaires_post(post_id, db):
+def lister_commentaires_post(post_id, db, viewer_id=0):
+    """(id, texte, date, auteur, vérifié, nb_likes, liké_par_moi, id_auteur)"""
     with db.cursor() as c:
         c.execute("""
-            SELECT c.comment, c.created_at, g.username, (g.badge IS NOT NULL OR g.is_admin = 1) AS verifie
+            SELECT c.id, c.comment, c.created_at, g.username, (g.badge IS NOT NULL OR g.is_admin = 1) AS verifie,
+                   (SELECT COUNT(*) FROM service_post_comment_likes l WHERE l.comment_id=c.id) AS likes,
+                   (SELECT COUNT(*) FROM service_post_comment_likes l WHERE l.comment_id=c.id AND l.gsociety_id=%s) AS liked,
+                   c.gsociety_id
             FROM service_post_comments c
             JOIN gsociety_accounts g ON g.id = c.gsociety_id
             WHERE c.post_id=%s ORDER BY c.id ASC
-        """, (post_id,))
+        """, (viewer_id, post_id))
         rows = c.fetchall()
     return rows
+
+
+def supprimer_commentaire(comment_id, viewer_id, est_admin, db):
+    """True si supprimé ; 'interdit' si ce n'est ni le sien ni un admin ; False si introuvable."""
+    with db.cursor() as c:
+        c.execute("SELECT gsociety_id FROM service_post_comments WHERE id=%s", (comment_id,))
+        row = c.fetchone()
+        if row is None:
+            return False
+        if row[0] != viewer_id and not est_admin:
+            return "interdit"
+        c.execute("DELETE FROM service_post_comment_likes WHERE comment_id=%s", (comment_id,))
+        c.execute("DELETE FROM service_post_comments WHERE id=%s", (comment_id,))
+        db.commit()
+    return True
+
+
+def basculer_like_commentaire(comment_id, gsociety_id, db):
+    """Ajoute ou retire le « j'aime ». Renvoie (aimé, total) ou None si le commentaire n'existe pas."""
+    with db.cursor() as c:
+        c.execute("SELECT 1 FROM service_post_comments WHERE id=%s", (comment_id,))
+        if c.fetchone() is None:
+            return None
+        c.execute("SELECT 1 FROM service_post_comment_likes WHERE comment_id=%s AND gsociety_id=%s", (comment_id, gsociety_id))
+        if c.fetchone():
+            c.execute("DELETE FROM service_post_comment_likes WHERE comment_id=%s AND gsociety_id=%s", (comment_id, gsociety_id))
+            aime = False
+        else:
+            try:
+                c.execute("INSERT INTO service_post_comment_likes (comment_id, gsociety_id) VALUES (%s,%s)", (comment_id, gsociety_id))
+            except pymysql.IntegrityError:
+                pass
+            aime = True
+        c.execute("SELECT COUNT(*) FROM service_post_comment_likes WHERE comment_id=%s", (comment_id,))
+        total = c.fetchone()[0]
+        db.commit()
+    return aime, total
+
+
+# ============================================================
+# Images des annonces — stockées en base (le disque de Render est
+# effacé à chaque déploiement), compressées côté navigateur.
+# ============================================================
+def enregistrer_media(uploader_id, mime, data, db):
+    with db.cursor() as c:
+        c.execute("INSERT INTO post_media (uploader_id, mime, data) VALUES (%s,%s,%s)", (uploader_id, mime, data))
+        db.commit()
+        return c.lastrowid
+
+
+def lire_media(media_id, db):
+    with db.cursor() as c:
+        c.execute("SELECT mime, data FROM post_media WHERE id=%s", (media_id,))
+        return c.fetchone()
+
+
+def images_des_posts(post_ids, db):
+    """{post_id: [id_image, ...]} dans l'ordre d'envoi."""
+    if not post_ids:
+        return {}
+    marques = ",".join(["%s"] * len(post_ids))
+    with db.cursor() as c:
+        c.execute(f"SELECT post_id, id FROM post_media WHERE post_id IN ({marques}) ORDER BY id", tuple(post_ids))
+        rows = c.fetchall()
+    out = {}
+    for pid, mid in rows:
+        out.setdefault(pid, []).append(mid)
+    return out
+
+
+def supprimer_post(post_id, db):
+    with db.cursor() as c:
+        c.execute("SELECT 1 FROM service_posts WHERE id=%s", (post_id,))
+        if c.fetchone() is None:
+            return False
+        c.execute("DELETE FROM service_post_comment_likes WHERE comment_id IN (SELECT id FROM service_post_comments WHERE post_id=%s)", (post_id,))
+        c.execute("DELETE FROM service_post_comments WHERE post_id=%s", (post_id,))
+        c.execute("DELETE FROM service_post_ratings WHERE post_id=%s", (post_id,))
+        c.execute("DELETE FROM post_media WHERE post_id=%s", (post_id,))
+        c.execute("DELETE FROM service_posts WHERE id=%s", (post_id,))
+        db.commit()
+    return True
 
 
 def noter_post(post_id, username, stars, db):

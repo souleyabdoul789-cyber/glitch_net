@@ -22,6 +22,18 @@ MOTS_DE_PASSE_FAIBLES = {
     "qwertyui", "qwerty123", "password1", "00000000", "11111111", "iloveyou", "abcd1234",
 }
 SERVICES = {"glitch", "grind"}
+POLICES = {"classic", "bold", "hand", "elegant", "mono", "poster"}
+
+
+def type_image(data: bytes):
+    """Type réel d'une image d'après ses premiers octets (jamais d'après ce que dit le client)."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.\-+_]{0,31}$")
 
 
@@ -128,6 +140,14 @@ def migrer_schema(db):
             if _colonne(c, "gsociety_accounts", col) is None:
                 etapes.append(f"ALTER TABLE gsociety_accounts ADD COLUMN {col} {ddl}")
 
+        if _colonne(c, "service_posts", "font_style") is None:
+            etapes.append("ALTER TABLE service_posts ADD COLUMN font_style VARCHAR(16) NULL")
+        etapes.append("CREATE TABLE IF NOT EXISTS post_media (id INT AUTO_INCREMENT PRIMARY KEY, post_id INT NULL, "
+                      "uploader_id INT NOT NULL, mime VARCHAR(20) NOT NULL, data MEDIUMBLOB NOT NULL, "
+                      "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, INDEX idx_post_media_post (post_id))")
+        etapes.append("CREATE TABLE IF NOT EXISTS service_post_comment_likes (comment_id INT NOT NULL, "
+                      "gsociety_id INT NOT NULL, PRIMARY KEY (comment_id, gsociety_id))")
+
         info = _colonne(c, "service_posts", "title")
         if info and info[0] == "varchar" and (info[1] or 0) < 255:
             etapes.append("ALTER TABLE service_posts MODIFY title VARCHAR(255) NOT NULL")
@@ -145,8 +165,9 @@ def migrer_schema(db):
             except Exception as e:  # une migration ratée ne doit pas empêcher le démarrage
                 log.error("Migration échouée (%s) : %s", sql, e)
         db.commit()
-        try:  # ménage : sessions expirées
+        try:  # ménage : sessions expirées, images envoyées mais jamais publiées
             c.execute("DELETE FROM gsociety_sessions WHERE expires_at < NOW()")
+            c.execute("DELETE FROM post_media WHERE post_id IS NULL AND created_at < NOW() - INTERVAL 1 DAY")
             db.commit()
         except Exception as e:
             log.error("Nettoyage des sessions impossible : %s", e)
@@ -170,7 +191,8 @@ async def securite_middleware(request, call_next):
     h["Referrer-Policy"] = "no-referrer"
     h["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.url.path.startswith("/api/"):
-        h["Cache-Control"] = "no-store"
+        if "cache-control" not in h:  # les images fixent leur propre cache
+            h["Cache-Control"] = "no-store"
         h["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
         h["X-Frame-Options"] = "DENY"
     return response

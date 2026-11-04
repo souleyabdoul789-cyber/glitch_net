@@ -1,7 +1,8 @@
 """Routes HTTP de la plateforme G-SOCIETY (comptes, sessions, clés, annonces,
 administration). Chaque route valide ses entrées, limite le débit, ferme sa
 connexion à la base et ne révèle jamais de détail interne."""
-from fastapi import APIRouter, Request
+import base64, binascii
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 
 from auth import (
@@ -10,11 +11,12 @@ from auth import (
     suspendre_compte_gsociety, reactiver_compte_gsociety, certifier_compte_gsociety,
     retirer_certification_gsociety, generer_api_key, verifier_api_key_identite,
     creer_post_service, lister_posts_service, creer_commentaire_post,
-    lister_commentaires_post, noter_post,
+    lister_commentaires_post, noter_post, supprimer_commentaire, basculer_like_commentaire,
+    enregistrer_media, lire_media, images_des_posts, supprimer_post,
 )
 from security import (
     limiteur, ip_client, valider_username, valider_mot_de_passe, url_https_valide,
-    SERVICES, VERSION_RE, MSG_TROP_DE_REQUETES,
+    SERVICES, VERSION_RE, MSG_TROP_DE_REQUETES, POLICES, type_image,
 )
 
 router = APIRouter()
@@ -165,6 +167,8 @@ class NouveauPost(BaseModel):
     body: str = Field(max_length=6000)
     version: str | None = Field(default=None, max_length=40)
     apk_link: str | None = Field(default=None, max_length=600)
+    font_style: str | None = Field(default=None, max_length=16)
+    image_ids: list[int] = Field(default_factory=list, max_length=4)
 
 
 @router.post("/api/posts/create")
@@ -184,6 +188,7 @@ async def api_posts_create(data: NouveauPost, request: Request):
             return ERR("Service inconnu")
         if not title or not body:
             return ERR("Titre et message requis")
+        font = data.font_style if data.font_style in POLICES else "classic"
         if len(title) > 150:
             return ERR("Titre trop long (150 caractères maximum)")
         if data.type == "release":
@@ -193,7 +198,8 @@ async def api_posts_create(data: NouveauPost, request: Request):
                 return ERR("Le lien de téléchargement doit commencer par https://")
         else:
             version = apk_link = None
-        ok = creer_post_service(data.service, data.type, admin[1], title, body, db, version=version, apk_link=apk_link)
+        ok = creer_post_service(data.service, data.type, admin[1], title, body, db, version=version, apk_link=apk_link,
+                                 font_style=font, image_ids=list(dict.fromkeys(data.image_ids))[:4])
     return {"success": bool(ok)}
 
 
@@ -209,10 +215,12 @@ async def api_posts_list(data: ListePosts, request: Request):
         return {"success": True, "posts": []}
     with _Db() as db:
         rows = lister_posts_service(data.service, db)
+        images = images_des_posts([r[0] for r in rows], db)
     posts = [{
         "id": r[0], "type": r[1], "title": r[2], "body": r[3], "version": r[4], "apk_link": r[5],
         "created_at": str(r[6]), "admin_username": r[7], "admin_verified": bool(r[8]),
         "note_moyenne": round(float(r[9]), 1) if r[9] is not None else None, "nb_notes": r[10],
+        "font_style": r[11] or "classic", "nb_comments": r[12], "images": images.get(r[0], []),
     } for r in rows]
     return {"success": True, "posts": posts}
 
@@ -242,6 +250,7 @@ async def api_posts_comment(data: NouveauCommentaire):
 
 class ListeCommentaires(BaseModel):
     post_id: int
+    session_token: str | None = Field(default=None, max_length=200)
 
 
 @router.post("/api/posts/comments")
@@ -249,9 +258,105 @@ async def api_posts_comments(data: ListeCommentaires, request: Request):
     if not limiteur.autorise(f"clist:{ip_client(request)}", 120, 60):
         return ERR(MSG_TROP_DE_REQUETES)
     with _Db() as db:
-        rows = lister_commentaires_post(data.post_id, db)
+        session = verifier_session(data.session_token, db) if data.session_token else None
+        viewer = session[0] if session else 0
+        admin = bool(session and est_admin_gsociety(data.session_token, db))
+        rows = lister_commentaires_post(data.post_id, db, viewer)
     return {"success": True, "comments": [
-        {"comment": r[0], "created_at": str(r[1]), "username": r[2], "verified": bool(r[3])} for r in rows]}
+        {"id": r[0], "comment": r[1], "created_at": str(r[2]), "username": r[3], "verified": bool(r[4]),
+         "likes": r[5], "liked": bool(r[6]), "can_delete": bool(viewer and (r[7] == viewer or admin))}
+        for r in rows]}
+
+
+class ActionCommentaire(BaseModel):
+    session_token: str = Field(max_length=200)
+    comment_id: int
+
+
+@router.post("/api/posts/comment/delete")
+async def api_comment_delete(data: ActionCommentaire):
+    with _Db() as db:
+        session = verifier_session(data.session_token, db)
+        if session is None:
+            return ERR(SESSION_EXPIREE)
+        admin = est_admin_gsociety(data.session_token, db) is not None
+        r = supprimer_commentaire(data.comment_id, session[0], admin, db)
+    if r == "interdit":
+        return ERR("Vous ne pouvez supprimer que vos propres commentaires.")
+    return {"success": bool(r)} if r else ERR("Commentaire introuvable")
+
+
+@router.post("/api/posts/comment/like")
+async def api_comment_like(data: ActionCommentaire):
+    with _Db() as db:
+        session = verifier_session(data.session_token, db)
+        if session is None:
+            return ERR(SESSION_EXPIREE)
+        if not limiteur.autorise(f"clike:{session[0]}", 60, 60):
+            return ERR("Doucement : réessayez dans une minute.")
+        r = basculer_like_commentaire(data.comment_id, session[0], db)
+    if r is None:
+        return ERR("Commentaire introuvable")
+    return {"success": True, "liked": r[0], "likes": r[1]}
+
+
+class ActionPost(BaseModel):
+    session_token: str = Field(max_length=200)
+    post_id: int
+
+
+@router.post("/api/posts/delete")
+async def api_post_delete(data: ActionPost):
+    with _Db() as db:
+        if est_admin_gsociety(data.session_token, db) is None:
+            return ERR("Accès refusé")
+        ok = supprimer_post(data.post_id, db)
+    return {"success": bool(ok)} if ok else ERR("Publication introuvable")
+
+
+# ------------------------------------------------------------------
+# Images des annonces (réservé aux administrateurs)
+# ------------------------------------------------------------------
+MEDIA_MAX_OCTETS = 700_000
+
+
+class EnvoiImage(BaseModel):
+    session_token: str = Field(max_length=200)
+    data_b64: str = Field(max_length=1_000_000)
+
+
+@router.post("/api/media/upload")
+async def api_media_upload(data: EnvoiImage, request: Request):
+    if not limiteur.autorise(f"media:{ip_client(request)}", 40, 3600):
+        return ERR(MSG_TROP_DE_REQUETES)
+    try:
+        brut = base64.b64decode(data.data_b64, validate=True)
+    except (binascii.Error, ValueError):
+        return ERR("Image illisible.")
+    if not brut or len(brut) > MEDIA_MAX_OCTETS:
+        return ERR("Image trop lourde (700 Ko maximum après compression).")
+    mime = type_image(brut)
+    if mime is None:
+        return ERR("Format non pris en charge (JPEG, PNG ou WebP).")
+    with _Db() as db:
+        admin = est_admin_gsociety(data.session_token, db)
+        if admin is None:
+            return ERR("Accès refusé")
+        media_id = enregistrer_media(admin[0], mime, brut, db)
+    return {"success": True, "id": media_id}
+
+
+@router.get("/api/media/{media_id}")
+async def api_media_get(media_id: int):
+    with _Db() as db:
+        row = lire_media(media_id, db)
+    if row is None:
+        return Response(status_code=404)
+    return Response(content=bytes(row[1]), media_type=row[0], headers={
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+        "Content-Disposition": "inline",
+    })
 
 
 class NoterPost(BaseModel):
