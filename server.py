@@ -293,7 +293,7 @@ async def glitch(ws: WebSocket):
                     if resulta:
                         data = await result(
                             c_result="c_result", statut="900",
-                            msg=f"Votre compte à été créé avec succès...!, vous pouvez à présent rejoindre ou créé un serveur N'oublie pas de visiter notre canal télégram https://t.me/glitch_chanel pour consulter les serveur les plus populaires "
+                            msg=f"Votre compte à été créé avec succès...!, vous pouvez à présent rejoindre ou créé un serveur"
                         )
                         await ws.send_json(data)
                         username = u
@@ -348,10 +348,10 @@ async def glitch(ws: WebSocket):
                 server_name = rep.get("server_name")
                 if join_server(server_name, username, db):
                     await join_notif(username, server_name)
-                    pa = await payload(type="join", server_name=server_name, msg=f"Vous Avez Rejoins {server_name} N'oubliez pas Notre Chaine telgram https://t.me/glitch_chanel")
+                    pa = await payload(type="join", server_name=server_name, msg=f"Vous Avez Rejoins {server_name}")
                     await ws.send_json(pa)
                 else:
-                    pa = await payload(type="JoinError", msg="Nom du serveur Incorect Veuillez Vous Assurez de Taper Le bon Nom ou consulter Notre Chaine pour plus d'info https://t.me/glitch_chanel")
+                    pa = await payload(type="JoinError", msg="Nom du serveur Incorect Veuillez Vous Assurez de Taper Le bon Nom")
                     await ws.send_json(pa)
 
             elif type_ == "list_rooms":

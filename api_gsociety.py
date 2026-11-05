@@ -18,6 +18,7 @@ from security import (
     limiteur, ip_client, valider_username, valider_mot_de_passe, url_https_valide,
     SERVICES, VERSION_RE, MSG_TROP_DE_REQUETES, POLICES, type_image,
 )
+from monitor import verifier_services
 
 router = APIRouter()
 
@@ -438,3 +439,14 @@ async def api_admin_certify(data: ActionCompte):
 @router.post("/api/admin/uncertify")
 async def api_admin_uncertify(data: ActionCompte):
     return _action_admin(data, retirer_certification_gsociety, "Certification retirée à {u}")
+
+
+@router.post("/api/admin/monitor")
+async def api_admin_monitor(data: SessionOnly, request: Request):
+    """État réel des services (administrateurs uniquement)."""
+    if not limiteur.autorise(f"mon:{ip_client(request)}", 20, 60):
+        return ERR(MSG_TROP_DE_REQUETES)
+    with _Db() as db:
+        if est_admin_gsociety(data.session_token, db) is None:
+            return ERR("Accès refusé")
+    return {"success": True, **(await verifier_services(get_db))}
